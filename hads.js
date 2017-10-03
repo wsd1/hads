@@ -14,6 +14,9 @@ const Matcher = require('./lib/matcher.js');
 const Renderer = require('./lib/renderer.js');
 const Helpers = require('./lib/helpers.js');
 const Indexer = require('./lib/indexer.js');
+const aliOssStorage = require('multer-ali-oss');
+const config = require('./config.json');
+
 
 const args = optimist
   .usage(`\n${pkg.name} ${pkg.version}\nUsage: $0 [root dir] [options]`)
@@ -54,7 +57,9 @@ const app = express();
 app.set('views', path.join(__dirname, '/views'));
 app.set('view engine', 'pug');
 app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({extended: true}));
+app.use(bodyParser.urlencoded({
+  extended: true
+}));
 app.use('/_hads/', express.static(path.join(__dirname, '/public')));
 app.use('/_hads/highlight/', express.static(path.join(modulesBasePath, 'node_modules/highlight.js/styles')));
 app.use('/_hads/octicons/', express.static(path.join(modulesBasePath, 'node_modules/octicons/build/font')));
@@ -88,7 +93,10 @@ const STYLESHEETS = [
 
 app.get('*', (req, res, next) => {
   let route = Helpers.extractRoute(req.path);
+  console.log("---------------\nGET: " + route);
   const query = req.query || {};
+  console.log("QUERY: " + JSON.stringify(query));
+
   let rootIndex = -1;
   let mdIndex = -1;
   const create = Helpers.hasQueryOption(query, 'create');
@@ -100,15 +108,23 @@ app.get('*', (req, res, next) => {
       edit = false;
       contentPromise = Promise.resolve(renderer.renderMarkdown(error));
       icon = 'octicon-alert';
-    } else if (search) {
+    }
+
+    else if (search) {
       contentPromise = renderer.renderSearch(query.search);
       icon = 'octicon-search';
-    } else if (Helpers.hasQueryOption(query, 'raw') || Matcher.isImage(filePath)) {
+    }
+
+    else if (Helpers.hasQueryOption(query, 'raw') || Matcher.isImage(filePath)) {
       return res.sendFile(filePath);
-    } else if (Matcher.isMarkdown(filePath)) {
+    }
+
+    else if (Matcher.isMarkdown(filePath)) {
       contentPromise = edit ? renderer.renderRaw(filePath) : renderer.renderFile(filePath);
       icon = 'octicon-file';
-    } else if (Matcher.isSourceCode(filePath)) {
+    }
+
+    else if (Matcher.isSourceCode(filePath)) {
       contentPromise = renderer.renderSourceCode(filePath, path.extname(filePath).replace('.', ''));
       icon = 'octicon-file-code';
     }
@@ -161,6 +177,7 @@ app.get('*', (req, res, next) => {
           if (fixedRoute !== route) {
             return res.redirect(fixedRoute + '?create=1');
           }
+          console.log("Create new: " + filePath);
 
           return mkdirpAsync(path.dirname(filePath))
             .then(() => fs.writeFileAsync(filePath, ''))
@@ -173,21 +190,37 @@ app.get('*', (req, res, next) => {
               route = '/';
               return renderPage();
             });
-        } else if (rootIndex !== -1 && rootIndex < ROOT_FILES.length - 1) {
+        }
+
+
+         else if (rootIndex !== -1 && rootIndex < ROOT_FILES.length - 1) {
           route = path.join(path.dirname(route), ROOT_FILES[++rootIndex]);
+
           return tryProcessFile();
-        } else if (rootIndex === -1 && path.basename(route) !== '' && (path.extname(route) === '' || mdIndex > -1) &&
-            mdIndex < Matcher.MARKDOWN_EXTENSIONS.length - 1) {
+        }
+
+
+
+        else if (rootIndex === -1 &&
+          path.basename(route) !== '' &&
+          (path.extname(route) === '' || mdIndex > -1) &&
+          mdIndex < Matcher.MARKDOWN_EXTENSIONS.length - 1) {
           // Maybe it's a github-style link without extension, let's try adding one
           const extension = Matcher.MARKDOWN_EXTENSIONS[++mdIndex];
           route = path.join(path.dirname(route), `${path.basename(route, path.extname(route))}.${extension}`);
           return tryProcessFile();
         }
+
+
+
         if (path.dirname(route) === path.sep && rootIndex === ROOT_FILES.length - 1) {
           error = '## No home page (╥﹏╥)\nDo you want to create an [index.md](/index.md?create=1) or ' +
-              '[readme.md](/readme.md?create=1) file perhaps?';
-        } else {
-          error = '## File not found ¯\\\\\\_(◕\\_\\_◕)_/¯\n> *There\'s a glitch in the matrix...*';
+            '[readme.md](/readme.md?create=1) file perhaps?';
+        }
+
+        else {
+          const new_file = Helpers.ensureMarkdownExtension(route);
+          error = `## File not found ¯\\\\\\_(◕\\_\\_◕)_/¯\n > Do you want to create [${new_file}](${new_file}?create=1)`;
         }
         title = '404 Error';
         route = '/';
@@ -199,9 +232,49 @@ app.get('*', (req, res, next) => {
   tryProcessFile();
 });
 
+app.post('/_hads/upload', [multer({
+    storage: aliOssStorage({
+    config: {
+      region: config.aliOSS.region,
+      accessKeyId: config.aliOSS.accessKeyId,
+      accessKeySecret: config.aliOSS.accessKeySecret,
+      bucket: config.aliOSS.bucket
+    },
+    filename: function (req, file, cb) {
+      cb(null, file.fieldname + '-' + Date.now() + path.extname(file.originalname))
+    }
+  }),
+/*
+multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, imagesPath);
+  },
+  filename: (req, file, cb) => {
+    mkdirpAsync(imagesPath).then(() => {
+      cb(null, shortId.generate() + path.extname(file.originalname));
+    });
+  }
+}),
+*/
+    onFileUploadStart: file => !file.mimetype.match(/^image\//),
+    limits: {
+      fileSize: 1024 * 1024 * 10 // 10 MB
+    }
+  })
+  .single('file'), (req, res) => {
+/*
+console.log("POST /_hads/upload: " + req.file.path);
+res.json(path.sep + path.relative(rootPath, req.file.path));
+*/
+  console.log("POST /_hads/upload: " + req.file.url);
+  res.json(req.file.url);
+  }
+]);
+
 app.post('*', (req, res, next) => {
   const route = Helpers.extractRoute(req.path);
   const filePath = path.join(rootPath, route);
+  console.log("---------------\nPOST: " + route);
 
   fs.statAsync(filePath)
     .then(stat => {
@@ -215,10 +288,13 @@ app.post('*', (req, res, next) => {
       }
     })
     .then(() => {
+      console.log("Write file done:" + filePath);
       indexer.updateIndexForFile(filePath);
+      console.log("Index file done");
       return renderer.renderFile(filePath);
     })
     .then(content => {
+
       res.render('file', {
         title: path.basename(filePath),
         route,
@@ -229,29 +305,14 @@ app.post('*', (req, res, next) => {
         pkg
       });
     })
-    .catch(() => {
+    .catch((err) => {
+      console.log(err);
+
       next();
     });
 });
 
-app.post('/_hads/upload', [multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      cb(null, imagesPath);
-    },
-    filename: (req, file, cb) => {
-      mkdirpAsync(imagesPath).then(() => {
-        cb(null, shortId.generate() + path.extname(file.originalname));
-      });
-    }
-  }),
-  onFileUploadStart: file => !file.mimetype.match(/^image\//),
-  limits: {
-    fileSize: 1024 * 1024 * 10   // 10 MB
-  }
-}).single('file'), (req, res) => {
-  res.json(path.sep + path.relative(rootPath, req.file.path));
-}]);
+
 
 indexer.indexFiles().then(() => {
   app.listen(args.port, args.host, () => {
